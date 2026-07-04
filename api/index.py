@@ -45,10 +45,6 @@ app = Flask(
 )
 app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
 
-# Session-level API key storage (in-memory, lost on server restart)
-_session_keys = {}
-
-
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
@@ -60,31 +56,17 @@ def index():
 # ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
-def _get_api_key(env_var: str, session_key: str) -> str | None:
-    """Get API key from environment or session storage."""
-    # Environment variable takes precedence
-    env_val = os.getenv(env_var)
-    if env_val:
-        return env_val
-    # Fall back to session storage and synchronize to environment
-    val = _session_keys.get(session_key)
-    if val:
-        os.environ[env_var] = val
-        return val
-    return None
-
-
 @app.route("/api/health")
 def health():
-    google_key = _get_api_key("GOOGLE_API_KEY", "google_key")
-    groq_key = _get_api_key("GROQ_API_KEY", "groq_key")
-    pinecone_key = _get_api_key("PINECONE_API_KEY", "pinecone_key")
-    
+    google_key = os.getenv("GOOGLE_API_KEY")
+    groq_key = os.getenv("GROQ_API_KEY")
+    pinecone_key = os.getenv("PINECONE_API_KEY")
+
     has_gemini = bool(google_key)
     has_groq = bool(groq_key)
     has_pinecone = bool(pinecone_key)
     configured = (has_gemini or has_groq) and has_pinecone
-    
+
     return jsonify(
         {
             "status": "ok",
@@ -101,26 +83,12 @@ def health():
 
 @app.route("/api/settings", methods=["POST"])
 def save_settings():
-    """Save API keys to session storage."""
+    """Accept settings payload without persisting secrets server-side."""
     try:
         data = request.get_json(silent=True) or {}
-        
-        if "googleApiKey" in data:
-            _session_keys["google_key"] = data["googleApiKey"].strip()
-        if "groqApiKey" in data:
-            _session_keys["groq_key"] = data["groqApiKey"].strip()
-        if "pineconeApiKey" in data:
-            _session_keys["pinecone_key"] = data["pineconeApiKey"].strip()
-        
-        # Update environment for this session
-        if _session_keys.get("google_key"):
-            os.environ["GOOGLE_API_KEY"] = _session_keys["google_key"]
-        if _session_keys.get("groq_key"):
-            os.environ["GROQ_API_KEY"] = _session_keys["groq_key"]
-        if _session_keys.get("pinecone_key"):
-            os.environ["PINECONE_API_KEY"] = _session_keys["pinecone_key"]
-        
-        return jsonify({"status": "ok", "message": "Settings saved"})
+        if not isinstance(data, dict):
+            return jsonify({"error": "Expected a JSON object"}), 400
+        return jsonify({"status": "ok", "message": "Settings saved locally in the browser"})
     except Exception as exc:
         traceback.print_exc()
         return jsonify({"error": f"Server error: {exc}"}), 500
@@ -129,8 +97,8 @@ def save_settings():
 @app.route("/api/upload", methods=["POST"])
 def upload():
     try:
-        google_key = _get_api_key("GOOGLE_API_KEY", "google_key")
-        pinecone_key = _get_api_key("PINECONE_API_KEY", "pinecone_key")
+        google_key = (request.form.get("googleApiKey") or "").strip()
+        pinecone_key = (request.form.get("pineconeApiKey") or "").strip()
         if not google_key or not pinecone_key:
             return jsonify({
                 "error": "Google API key and Pinecone API key are required to embed and index documents. "
@@ -153,7 +121,11 @@ def upload():
         text, page_count = extract_text_from_pdf(file_bytes)
 
         # Index into Pinecone
-        session_id = index_document(text)
+        session_id = index_document(
+            text,
+            pinecone_api_key=pinecone_key,
+            google_api_key=google_key,
+        )
 
         return jsonify(
             {
@@ -181,16 +153,18 @@ def ask():
         question = (data.get("question") or "").strip()
         model = (data.get("model") or "gemini").strip().lower()
 
-        pinecone_key = _get_api_key("PINECONE_API_KEY", "pinecone_key")
+        pinecone_key = (data.get("pineconeApiKey") or "").strip()
         if not pinecone_key:
             return jsonify({"error": "Pinecone API key is required. Please set it in Settings."}), 400
 
+        groq_key = ""
         if model == "groq":
-            groq_key = _get_api_key("GROQ_API_KEY", "groq_key")
+            groq_key = (data.get("groqApiKey") or "").strip()
             if not groq_key:
                 return jsonify({"error": "Groq API key is required to query with Groq. Please set it in Settings."}), 400
+            google_key = ""
         else:
-            google_key = _get_api_key("GOOGLE_API_KEY", "google_key")
+            google_key = (data.get("googleApiKey") or "").strip()
             if not google_key:
                 return jsonify({"error": "Google API key is required to query with Gemini. Please set it in Settings."}), 400
 
@@ -205,7 +179,14 @@ def ask():
 
         def event_stream():
             try:
-                for event in query_document_stream(session_id, question, model):
+                for event in query_document_stream(
+                    session_id,
+                    question,
+                    model,
+                    pinecone_api_key=pinecone_key,
+                    google_api_key=google_key,
+                    groq_api_key=groq_key,
+                ):
                     yield f"data: {json.dumps(event)}\n\n"
             except Exception as exc:  # noqa: BLE001
                 traceback.print_exc()

@@ -1266,10 +1266,10 @@
 
     async function checkHealthWithSettings() {
       try {
-        const res = await fetch('/api/health');
-        const data = await res.json();
-        if (data.configured) {
-          setStatus('ready', 'Configured');
+        const settings = JSON.parse(localStorage.getItem('docuMindSettings') || '{}');
+        const hasBrowserConfig = Boolean(settings.pineconeApiKey && (settings.googleApiKey || settings.groqApiKey));
+        if (hasBrowserConfig) {
+          setStatus('ready', 'Configured locally');
         } else {
           setStatus('', 'Missing API Keys');
         }
@@ -1278,20 +1278,8 @@
       }
     }
 
-    async function syncSettingsOnLoad() {
-      const settings = JSON.parse(localStorage.getItem('docuMindSettings') || '{}');
-      if (settings.googleApiKey || settings.groqApiKey || settings.pineconeApiKey) {
-        try {
-          await fetch('/api/settings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(settings),
-          });
-        } catch (e) {
-          console.error("Failed to sync settings on load:", e);
-        }
-      }
-      await checkHealthWithSettings();
+    function syncSettingsOnLoad() {
+      checkHealthWithSettings();
     }
     syncSettingsOnLoad();
 
@@ -1342,8 +1330,12 @@
           <div class="desc">Extracting structural text, computing embeddings with Gemini, and indexing chunks. Please wait.</div>
         </div>`;
 
+      const settings = JSON.parse(localStorage.getItem('docuMindSettings') || '{}');
       const fd = new FormData();
       fd.append('file', file);
+      fd.append('googleApiKey', settings.googleApiKey || '');
+      fd.append('groqApiKey', settings.groqApiKey || '');
+      fd.append('pineconeApiKey', settings.pineconeApiKey || '');
 
       try {
         const res = await fetch('/api/upload', { method: 'POST', body: fd });
@@ -1489,7 +1481,14 @@
         const res = await fetch('/api/ask', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: state.sessionId, question: q, model: model }),
+          body: JSON.stringify({
+            session_id: state.sessionId,
+            question: q,
+            model: model,
+            googleApiKey: settings.googleApiKey || '',
+            groqApiKey: settings.groqApiKey || '',
+            pineconeApiKey: settings.pineconeApiKey || '',
+          }),
           signal: state.abortCtrl.signal,
         });
 
@@ -1678,26 +1677,10 @@
         return;
       }
 
-      // Sync settings with the backend session keys
-      fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings),
-      })
-        .then(res => res.json())
-        .then(data => {
-          if (data.status === 'ok') {
-            localStorage.setItem('docuMindSettings', JSON.stringify(settings));
-            closeModal();
-            checkHealthWithSettings();
-            toast('Credentials configured successfully!', 'success');
-          } else {
-            toast('Configuration write error: ' + (data.error || 'Server error'), 'error');
-          }
-        })
-        .catch(err => {
-          toast('API Settings connection failure: ' + err.message, 'error');
-        });
+      localStorage.setItem('docuMindSettings', JSON.stringify(settings));
+      closeModal();
+      checkHealthWithSettings();
+      toast('Credentials saved locally in this browser.', 'success');
     }
 
     function openModal() {

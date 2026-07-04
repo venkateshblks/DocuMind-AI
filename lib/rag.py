@@ -34,57 +34,49 @@ CHUNK_OVERLAP = 100
 TOP_K = 4
 INDEX_BATCH = 50  # documents per Pinecone upsert batch
 
-# ---------------------------------------------------------------------------
-# Singletons (avoid re-creating clients on every serverless invocation)
-# ---------------------------------------------------------------------------
-_pc: Pinecone | None = None
-_embeddings: GoogleGenerativeAIEmbeddings | None = None
+def _get_pinecone(api_key: str) -> Pinecone:
+    if not api_key:
+        raise ValueError("Pinecone API key is required.")
+    return Pinecone(api_key=api_key)
 
 
-def _get_pinecone() -> Pinecone:
-    global _pc
-    if _pc is None:
-        _pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
-    return _pc
+def _get_embeddings(google_api_key: str) -> GoogleGenerativeAIEmbeddings:
+    if not google_api_key:
+        raise ValueError("Google API key is required.")
+    return GoogleGenerativeAIEmbeddings(
+        model=EMBED_MODEL,
+        google_api_key=google_api_key,
+    )
 
 
-def _get_embeddings() -> GoogleGenerativeAIEmbeddings:
-    global _embeddings
-    if _embeddings is None:
-        _embeddings = GoogleGenerativeAIEmbeddings(
-            model=EMBED_MODEL,
-            google_api_key=os.environ["GOOGLE_API_KEY"],
-        )
-    return _embeddings
-
-
-def _get_llm(model: Literal["gemini", "groq"] = "gemini"):
+def _get_llm(
+    model: Literal["gemini", "groq"] = "gemini",
+    *,
+    google_api_key: str | None = None,
+    groq_api_key: str | None = None,
+):
     """Get the appropriate LLM instance based on the model parameter."""
     if model == "groq":
-        if not os.environ.get("GROQ_API_KEY"):
-            raise ValueError(
-                "Groq API key not configured. Set GROQ_API_KEY environment variable."
-            )
+        if not groq_api_key:
+            raise ValueError("Groq API key is required for Groq models.")
         return ChatGroq(
             model=LLM_MODEL_GROQ,
             temperature=0.2,
-            api_key=os.environ["GROQ_API_KEY"],
+            api_key=groq_api_key,
         )
     else:  # gemini (default)
-        if not os.environ.get("GOOGLE_API_KEY"):
-            raise ValueError(
-                "Google API key not configured. Set GOOGLE_API_KEY environment variable."
-            )
+        if not google_api_key:
+            raise ValueError("Google API key is required for Gemini models.")
         return ChatGoogleGenerativeAI(
             model=LLM_MODEL_GEMINI,
             temperature=0.2,
-            google_api_key=os.environ["GOOGLE_API_KEY"],
+            google_api_key=google_api_key,
         )
 
 
-def ensure_index() -> None:
+def ensure_index(pinecone_api_key: str) -> None:
     """Create the Pinecone index if it doesn't already exist."""
-    pc = _get_pinecone()
+    pc = _get_pinecone(pinecone_api_key)
     if INDEX_NAME not in pc.list_indexes().names():
         pc.create_index(
             name=INDEX_NAME,
@@ -137,20 +129,26 @@ def split_text(
 # ---------------------------------------------------------------------------
 # Indexing
 # ---------------------------------------------------------------------------
-def index_document(text: str) -> str:
+def index_document(
+    text: str,
+    *,
+    pinecone_api_key: str,
+    google_api_key: str,
+) -> str:
     """
     Chunk + embed + upsert the document into a fresh Pinecone namespace.
 
     Returns the namespace (session_id) the client should use for queries.
     """
     session_id = str(uuid.uuid4())
-    ensure_index()
+    os.environ["PINECONE_API_KEY"] = pinecone_api_key
+    ensure_index(pinecone_api_key)
 
     splits = split_text(text)
     if not splits:
         raise ValueError("No text chunks could be created from the document.")
 
-    embeddings = _get_embeddings()
+    embeddings = _get_embeddings(google_api_key)
     vectorstore = PineconeVectorStore(
         index_name=INDEX_NAME,
         embedding=embeddings,
@@ -179,7 +177,13 @@ Rules:
 
 
 def query_document_stream(
-    session_id: str, question: str, model: Literal["gemini", "groq"] = "gemini"
+    session_id: str,
+    question: str,
+    model: Literal["gemini", "groq"] = "gemini",
+    *,
+    pinecone_api_key: str,
+    google_api_key: str | None = None,
+    groq_api_key: str | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     """
     Run a manual RAG chain (retrieve -> prompt -> generate) and yield
@@ -189,7 +193,8 @@ def query_document_stream(
       {"type": "token",    "content": "..."}   # many times
       {"type": "done"}                        # once, at the end
     """
-    embeddings = _get_embeddings()
+    os.environ["PINECONE_API_KEY"] = pinecone_api_key
+    embeddings = _get_embeddings(google_api_key or "")
     vectorstore = PineconeVectorStore(
         index_name=INDEX_NAME,
         embedding=embeddings,
@@ -216,7 +221,11 @@ def query_document_stream(
     # --- Generate ---
     context = "\n\n".join(doc.page_content for doc in docs)
 
-    llm = _get_llm(model)
+    llm = _get_llm(
+        model,
+        google_api_key=google_api_key,
+        groq_api_key=groq_api_key,
+    )
 
     prompt = (
         f"{SYSTEM_PROMPT}\n\n"
