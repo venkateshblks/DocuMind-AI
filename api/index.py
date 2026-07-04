@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import traceback
+import tempfile
 
 # Make the project root importable so `lib.*` resolves on both Vercel
 # and when running `python api/index.py` locally.
@@ -30,6 +31,11 @@ try:
     load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 except Exception:
     pass
+
+os.makedirs("/tmp", exist_ok=True)
+os.environ.setdefault("TMPDIR", "/tmp")
+os.environ.setdefault("HOME", "/tmp")
+tempfile.tempdir = "/tmp"
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 
