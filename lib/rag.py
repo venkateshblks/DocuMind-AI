@@ -14,6 +14,9 @@ import os
 import uuid
 from typing import Any, Generator, Literal
 
+os.environ.setdefault("PINECONE_DISABLE_THREADS", "1")
+os.environ.setdefault("PINECONE_POOL_THREADS", "1")
+
 from langchain_core.documents import Document
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_groq import ChatGroq
@@ -155,9 +158,18 @@ def index_document(
         namespace=session_id,
     )
 
-    # Upsert in batches to stay within Pinecone request limits.
+    # Upsert in smaller batches to stay within Pinecone request limits and
+    # avoid multiprocessing/threading issues in serverless environments.
     for i in range(0, len(splits), INDEX_BATCH):
-        vectorstore.add_documents(splits[i : i + INDEX_BATCH])
+        batch = splits[i : i + INDEX_BATCH]
+        try:
+            vectorstore.add_documents(batch)
+        except Exception as exc:
+            if len(batch) == 1:
+                raise
+            # Retry smaller if a batch fails in serverless runtime.
+            for item in batch:
+                vectorstore.add_documents([item])
 
     return session_id
 
